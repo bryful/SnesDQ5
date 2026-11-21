@@ -1,0 +1,13 @@
+#pragma once
+inline constexpr const char* ThirdPartyNotices = R"SnesNotice(
+Snes9x
+@NOTICE_SNES9X@
+SDL2
+@NOTICE_SDL@
+Dear ImGui
+@NOTICE_IMGUI@
+snes_ntsc
+@NOTICE_NTSC@
+WiizV touch layout reference
+@NOTICE_WIIZV@
+)SnesNotice";

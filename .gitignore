@@ -1,0 +1,31 @@
+# User data and copyrighted game assets
+.rom/
+_dl/
+*.smc
+*.sfc
+*.srm
+*.state*
+*.spc
+*.sav
+data/
+imgui.ini
+# Build tools / output
+build*/
+.tools/
+.gradle/
+.cxx/
+local.properties
+third_party/
+# Never publish Android signing material
+.signing/
+*.jks
+*.keystore
+key.properties
+signing.properties
+*.p12
+*.pem
+.env*
+!*.example
+
+*.log
+*.bak

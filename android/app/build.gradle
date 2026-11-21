@@ -1,0 +1,47 @@
+plugins { id 'com.android.application' }
+def releaseSigning = new Properties()
+def releaseSigningFile = rootProject.file('signing.properties')
+if (releaseSigningFile.exists()) {
+    releaseSigningFile.withInputStream { releaseSigning.load(it) }
+}
+android {
+    namespace 'jp.snesdq5.player'
+    compileSdk 35
+    ndkVersion '30.0.16248370'
+    defaultConfig {
+        applicationId 'jp.snesdq5.player'
+        minSdk 26
+        targetSdk 35
+        versionCode 17
+        versionName '0.1.16'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_shared'; targets 'main' } }
+    }
+    externalNativeBuild { cmake { path '../../CMakeLists.txt'; version '3.22.1' } }
+    sourceSets { main.java.srcDirs += '../../third_party/SDL/android-project/app/src/main/java' }
+    signingConfigs {
+        release {
+            if (!releaseSigning.isEmpty()) {
+                storeFile rootProject.file(releaseSigning.getProperty('storeFile'))
+                storePassword releaseSigning.getProperty('storePassword')
+                keyAlias releaseSigning.getProperty('keyAlias')
+                keyPassword releaseSigning.getProperty('keyPassword')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+}
+tasks.configureEach {
+    if (name == 'validateSigningRelease') {
+        doFirst {
+            if (releaseSigning.isEmpty()) {
+                throw new GradleException('Release signing requires android/signing.properties. See docs/RELEASE.md.')
+            }
+        }
+    }
+}
