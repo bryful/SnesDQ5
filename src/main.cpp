@@ -5,6 +5,7 @@
 #include "touch.h"
 #include <SDL.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_sdl2.h>
 #include <imgui_impl_sdlrenderer2.h>
 #include <libretro.h>
@@ -60,6 +61,17 @@ std::vector<TouchButton> touchButtons;
 struct Finger { SDL_FPoint point; bool sampled=false; };
 std::map<SDL_FingerID,Finger> fingers;
 uint16_t touchPulse=0;
+void scrollTouchWindow(float scale) {
+    auto& io=ImGui::GetIO();
+    if(io.MouseSource==ImGuiMouseSource_TouchScreen &&
+       ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+       ImGui::IsMouseDragging(ImGuiMouseButton_Left,8*scale) &&
+       ImGui::GetScrollMaxY()>0 &&
+       io.MousePos.x<ImGui::GetWindowPos().x+ImGui::GetWindowWidth()-ImGui::GetStyle().ScrollbarSize) {
+        ImGui::ClearActiveID();
+        ImGui::SetScrollY(std::clamp(ImGui::GetScrollY()-io.MouseDelta.y,0.f,ImGui::GetScrollMaxY()));
+    }
+}
 uint16_t readButtons(SDL_GameController* pad, const Options& options, int w, int h) {
     const auto* key=SDL_GetKeyboardState(nullptr); uint16_t bits=0;
     auto set=[&](unsigned id,bool on) { if(on) bits|=uint16_t(1u<<id); };
@@ -130,6 +142,7 @@ int main(int argc,char** argv) {
         if(!renderer) throw std::runtime_error(SDL_GetError());
         ImGui::CreateContext(); auto& io=ImGui::GetIO(); io.IniFilename=nullptr; io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard|ImGuiConfigFlags_NavEnableGamepad;
         io.ConfigNavCursorVisibleAlways=true;
+        io.ConfigWindowsMoveFromTitleBarOnly=true;
         float uiScale=1.f;
 #ifdef __ANDROID__
         float dpi=0; if(SDL_GetDisplayDPI(0,&dpi,nullptr,nullptr)==0 && dpi>0) uiScale=std::clamp(dpi/160.f,1.f,3.f); else uiScale=2.f;
@@ -141,28 +154,46 @@ int main(int argc,char** argv) {
 #endif
         if(font) io.Fonts->AddFontFromFileTTF(font,18.f,nullptr,io.Fonts->GetGlyphRangesJapanese());
         ImGui::StyleColorsDark(); ImGui::GetStyle().FrameRounding=6; ImGui::GetStyle().FramePadding={12,10}; ImGui::GetStyle().ScaleAllSizes(uiScale);
+        ImGui::GetStyle().ScrollbarSize=28*uiScale;
+        ImGui::GetStyle().GrabMinSize=32*uiScale;
         ImGui_ImplSDL2_InitForSDLRenderer(window,renderer); ImGui_ImplSDLRenderer2_Init(renderer);
         Core core; core.options=settings.options;
         SDL_AudioDeviceID audio=0;
+        bool audioPriming=true;
+        auto resetAudio=[&]() {
+            if(audio) { SDL_PauseAudioDevice(audio,1); SDL_ClearQueuedAudio(audio); }
+            audioPriming=true;
+        };
         auto openAudio=[&]() {
             if(audio) SDL_CloseAudioDevice(audio);
             SDL_AudioSpec wanted{}; wanted.freq=int(core.sampleRate); wanted.format=AUDIO_S16SYS; wanted.channels=2; wanted.samples=1024;
             audio=SDL_OpenAudioDevice(nullptr,0,&wanted,nullptr,0);
-            if(!audio) throw std::runtime_error(SDL_GetError()); SDL_PauseAudioDevice(audio,0);
+            if(!audio) throw std::runtime_error(SDL_GetError()); audioPriming=true;
         };
-        core.audio=[&](const int16_t* samples,size_t frames) { if(audio && SDL_GetQueuedAudioSize(audio)<unsigned(core.sampleRate*.2*4)) SDL_QueueAudio(audio,samples,Uint32(frames*4)); };
+        core.audio=[&](const int16_t* samples,size_t frames) {
+            if(!audio || !frames) return;
+            auto queued=SDL_GetQueuedAudioSize(audio);
+            if(!queued && !audioPriming) { SDL_PauseAudioDevice(audio,1); audioPriming=true; }
+            if(queued<unsigned(core.sampleRate*.2*4)) SDL_QueueAudio(audio,samples,Uint32(frames*4));
+            // Refill after an underrun before restarting the device, rather than
+            // alternating a short batch with silence on every display frame.
+            if(audioPriming && SDL_GetQueuedAudioSize(audio)>=unsigned(core.sampleRate*.06*4)) {
+                audioPriming=false; SDL_PauseAudioDevice(audio,0);
+            }
+        };
         std::string message; bool menu=true, running=true, pause=false, browser=false, touch=settings.touch, focused=true;
         bool requestMenuFocus=true, blockGameInput=true;
+        int menuPage=3;
         auto showMenu=[&](bool open) {
             menu=open || !core.loaded;
             requestMenuFocus=menu; blockGameInput=true;
             core.buttons=0; fingers.clear(); touchPulse=0;
-            if(audio) SDL_ClearQueuedAudio(audio);
+            resetAudio();
         };
         fs::path directory=storage::root()/"rom";
         if(fs::exists(".rom")) directory=fs::absolute(".rom");
         auto load=[&](const std::string& path) {
-            core.load(path); openAudio(); settings.lastRom=path; settings.options=core.options;
+            core.load(path); openAudio(); settings.lastRom=path; settings.options=core.options; menuPage=0;
             if(!smoke) settings.save(); showMenu(false); browser=false; message="ROM loaded";
         };
         if(!romArgument.empty()) load(romArgument);
@@ -215,7 +246,7 @@ int main(int argc,char** argv) {
                     }
                     fingers.erase(event.tfinger.fingerId);
                 }
-                if(event.type==SDL_WINDOWEVENT && (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST || event.window.event==SDL_WINDOWEVENT_MINIMIZED)) { focused=false; fingers.clear(); touchPulse=0; if(audio) SDL_ClearQueuedAudio(audio); attempt([&]{core.saveRam();}); }
+                if(event.type==SDL_WINDOWEVENT && (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST || event.window.event==SDL_WINDOWEVENT_MINIMIZED)) { focused=false; fingers.clear(); touchPulse=0; resetAudio(); attempt([&]{core.saveRam();}); }
                 if(event.type==SDL_WINDOWEVENT && event.window.event==SDL_WINDOWEVENT_FOCUS_GAINED) focused=true;
                 if(event.type==SDL_WINDOWEVENT && event.window.event==SDL_WINDOWEVENT_SIZE_CHANGED) { fingers.clear(); touchPulse=0; blockGameInput=true; }
                 if(event.type==SDL_APP_WILLENTERBACKGROUND) { focused=false; fingers.clear(); touchPulse=0; blockGameInput=true; attempt([&]{core.saveRam();}); }
@@ -240,22 +271,41 @@ int main(int argc,char** argv) {
                 else if(core.loaded) showMenu(false);
                 else requestMenuFocus=true;
             }
+            if(menu && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)) {
+                int direction=int(ImGui::IsKeyPressed(ImGuiKey_GamepadR1,false))-int(ImGui::IsKeyPressed(ImGuiKey_GamepadL1,false));
+                if(direction) { menuPage=(menuPage+direction+4)%4; browser=false; requestMenuFocus=true; }
+            }
             if(menu || !core.loaded) {
                 float top=safe.y+8*uiScale;
-                ImGuiCond placement=ImGuiCond_FirstUseEver;
-#ifdef __ANDROID__
-                placement=ImGuiCond_Always;
-#endif
+                ImGuiCond placement=ImGuiCond_Always;
                 ImGui::SetNextWindowPos({safe.x+8*uiScale,top},placement); ImGui::SetNextWindowSize({std::min(620.f*uiScale,safe.w-16*uiScale),std::min(720.f*uiScale,safe.h-16*uiScale)},placement);
                 bool focusMenu=requestMenuFocus;
                 if(focusMenu) ImGui::SetNextWindowFocus();
-                ImGui::Begin("SnesDQ5",nullptr,ImGuiWindowFlags_NoCollapse);
-                ImGui::TextWrapped("D-pad / left stick: move | Bottom button: OK | Right button: Back | L3: menu");
-                ImGui::TextUnformatted("Dragon Quest V / SNES");
-                ImGui::TextWrapped("%s",core.loaded ? fs::u8path(core.romPath).filename().u8string().c_str():"Open your own ROM to start");
-                if(!stateError.empty()) ImGui::TextWrapped("%s",stateError.c_str());
+                bool menuOpen=true;
+                ImGui::Begin("SnesDQ5",core.loaded?&menuOpen:nullptr,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+                if(!menuOpen) { pause=false; showMenu(false); }
                 if(focusMenu) ImGui::SetKeyboardFocusHere();
-                if(core.loaded && ImGui::Button("Resume")) showMenu(false);
+                ImGui::BeginDisabled(!core.loaded);
+                if(ImGui::Button("Back to game",{ImGui::GetContentRegionAvail().x,40*uiScale})) { pause=false; showMenu(false); }
+                ImGui::EndDisabled();
+                const char* pages[]{"Play","Saves","Options","Files"};
+                float pageWidth=(ImGui::GetContentRegionAvail().x-3*ImGui::GetStyle().ItemSpacing.x)/4;
+                for(int page=0;page<4;++page) {
+                    if(page) ImGui::SameLine();
+                    if(page==menuPage) ImGui::PushStyleColor(ImGuiCol_Button,ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                    bool selected=ImGui::Button(pages[page],{pageWidth,40*uiScale});
+                    if(page==menuPage) ImGui::PopStyleColor();
+                    if(selected) { menuPage=page; browser=false; }
+                }
+                ImGui::Separator();
+                ImGui::PushID(menuPage);
+                ImGui::BeginChild("menu-content",{0,0},ImGuiChildFlags_NavFlattened,ImGuiWindowFlags_NoMove);
+                // Dear ImGui provides scrolling and drag detection; cancel the
+                // pressed widget once a touch becomes a scrolling gesture.
+                scrollTouchWindow(uiScale);
+                if(!stateError.empty()) ImGui::TextWrapped("%s",stateError.c_str());
+                if(menuPage==3) {
+                ImGui::TextWrapped("%s",core.loaded ? fs::u8path(core.romPath).filename().u8string().c_str():"Open your own ROM to start");
                 if(ImGui::Button("Open ROM")) {
 #ifdef __ANDROID__
                     storage::pickRom();
@@ -271,7 +321,8 @@ int main(int argc,char** argv) {
                 if(browser) {
                     ImGui::TextWrapped("%s",directory.u8string().c_str());
                     if(ImGui::Button("Parent directory") && directory.has_parent_path()) directory=directory.parent_path();
-                    ImGui::BeginChild("files",{0,180},true);
+                    ImGui::BeginChild("files",{0,180*uiScale},true);
+                    scrollTouchWindow(uiScale);
                     std::error_code ec; std::vector<fs::directory_entry> entries;
                     for(fs::directory_iterator it(directory,ec),end;!ec && it!=end;it.increment(ec)) entries.push_back(*it);
                     std::sort(entries.begin(),entries.end(),[](auto& a,auto& b) {return a.path()<b.path();});
@@ -280,32 +331,42 @@ int main(int argc,char** argv) {
                         bool dir=entry.is_directory(ec);
                         if(!dir && ext!=".sfc" && ext!=".smc") continue;
                         std::string name=(dir?"[DIR] ":"")+entry.path().filename().u8string();
-                        if(ImGui::Selectable(name.c_str())) { if(dir) { directory=entry.path(); break; } else attempt([&]{load(entry.path().u8string());}); }
+                        if(ImGui::Selectable(name.c_str(),false,0,{0,40*uiScale})) { if(dir) { directory=entry.path(); break; } else attempt([&]{load(entry.path().u8string());}); }
                     }
                     ImGui::EndChild();
                 }
-                ImGui::SeparatorText("Playback");
+                }
+                if(menuPage==0) {
+                ImGui::SeparatorText("Speed");
                 bool changed=false;
                 for(int speed:{1,2,3,4,8}) { if(speed!=1) ImGui::SameLine(); changed |= ImGui::RadioButton((std::to_string(speed)+"x").c_str(),&core.options.speed,speed); }
-                ImGui::TextWrapped("SPC timing keeps audio at 1x (experimental; music/SE transitions unverified).");
-                changed |= ImGui::Checkbox("Swap A / B",&core.options.swapAB); ImGui::SameLine(); changed |= ImGui::Checkbox("Swap X / Y",&core.options.swapXY);
-                changed |= ImGui::Checkbox("Show touch with pad",&touch); ImGui::Checkbox("Pause",&pause);
-                if(changed) attempt([&]{core.configure(); settings.options=core.options; settings.touch=touch; settings.save(); if(audio) SDL_ClearQueuedAudio(audio);});
+                ImGui::SeparatorText("Controls");
+                changed |= ImGui::Checkbox("Swap A / B",&core.options.swapAB);
+                changed |= ImGui::Checkbox("Swap X / Y",&core.options.swapXY);
+                changed |= ImGui::Checkbox("Show touch with pad",&touch);
+                if(changed) attempt([&]{core.configure(); settings.options=core.options; settings.touch=touch; settings.save(); resetAudio();});
+                }
+                if(menuPage==1) {
                 ImGui::SeparatorText("Save states");
                 ImGui::BeginDisabled(!core.loaded);
                 for(int slot=1;slot<=5;++slot) {
                     ImGui::PushID(slot); ImGui::Text("Slot %d",slot); ImGui::SameLine();
-                    if(ImGui::Button("Save")) stateAction(slot,false);
-                    ImGui::SameLine(); if(ImGui::Button("Load")) stateAction(slot,true);
+                    if(ImGui::Button("Save",{90*uiScale,40*uiScale})) stateAction(slot,false);
+                    ImGui::SameLine(); if(ImGui::Button("Load",{90*uiScale,40*uiScale})) stateAction(slot,true);
                     ImGui::PopID();
                 }
                 ImGui::EndDisabled();
+                }
+                if(menuPage==2) {
                 ImGui::SeparatorText("DQ5 options");
-                ImGui::TextWrapped("ROM profile: %s",core.supported?"Japanese v1.0 recognized":"Unrecognized / not loaded");
+                bool optionColumns=ImGui::GetContentRegionAvail().x>=480*uiScale;
+                if(optionColumns) ImGui::BeginTable("option-columns",2,ImGuiTableFlags_SizingStretchSame);
                 ImGui::BeginDisabled(!core.rewardsAvailable);
                 const int multipliers[]{1,4,8,16,32,64,128};
                 const char* labels[]{"1x","4x","8x","16x","32x","64x","128x"};
                 auto multiplier=[&](const char* label,int& value) {
+                    if(optionColumns) ImGui::TableNextColumn();
+                    ImGui::SetNextItemWidth(std::max(65*uiScale,ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize(label).x-8*uiScale));
                     int selected=0; for(int n=0;n<7;++n) if(multipliers[n]==value) selected=n;
                     bool edited=ImGui::Combo(label,&selected,labels,7); if(edited) value=multipliers[selected]; return edited;
                 };
@@ -315,23 +376,45 @@ int main(int argc,char** argv) {
                 if(rewardChanged) attempt([&]{core.configure(); settings.options=core.options; settings.save();});
                 if(!core.rewardsAvailable) ImGui::TextWrapped("Reward multipliers require the verified Japanese v1.0 ROM.");
                 ImGui::BeginDisabled(!core.gameOptionsAvailable);
-                bool optionChanged=ImGui::Checkbox("Recruit eligible monsters",&core.options.recruit);
-                optionChanged |= ImGui::Checkbox("Guaranteed eligible drops",&core.options.drop);
-                optionChanged |= ImGui::Checkbox("Remove equipment restrictions",&core.options.equipment);
-                optionChanged |= ImGui::Checkbox("Keep consumable items on use",&core.options.items);
-                optionChanged |= ImGui::Checkbox("Monster level cap: 99",&core.options.level);
+                if(optionColumns) ImGui::TableNextColumn();
+                bool optionChanged=ImGui::Checkbox("Recruit monsters",&core.options.recruit);
+                if(optionColumns) ImGui::TableNextColumn();
+                optionChanged |= ImGui::Checkbox("Guaranteed drops",&core.options.drop);
+                if(optionColumns) ImGui::TableNextColumn();
+                optionChanged |= ImGui::Checkbox("Any equipment",&core.options.equipment);
+                if(optionColumns) ImGui::TableNextColumn();
+                optionChanged |= ImGui::Checkbox("Keep used items",&core.options.items);
+                if(optionColumns) ImGui::TableNextColumn();
+                optionChanged |= ImGui::Checkbox("Monster level: 99",&core.options.level);
                 ImGui::EndDisabled();
+                if(optionColumns) ImGui::EndTable();
                 if(optionChanged) attempt([&]{core.configure();settings.options=core.options;settings.save();});
+                }
+                if(ImGui::CollapsingHeader("Help")) {
+                ImGui::TextWrapped("D-pad / stick: move | Bottom button: OK | Right button: Back | L / R: page | L3: menu");
+                ImGui::TextWrapped("Android Back / title-bar close: return to game. Swipe content to scroll.");
+                ImGui::TextWrapped("SPC audio at 1x is experimental.");
                 ImGui::TextWrapped("Recruitment: normal story/party/level eligibility still applies. Drops: mixed-species battles remain excluded by the game.");
                 ImGui::TextWrapped("Keep items: ordinary field/battle use only. Breakage, automatic activation and story events are not covered.");
                 ImGui::TextWrapped("Monster cap: existing allies can grow to 99. Turning OFF keeps earned levels/stats and restores the normal cap.");
                 ImGui::Separator(); ImGui::TextWrapped("Keyboard: arrows, Z=B X=A A=Y S=X, Q=L W=R, Enter=Start, right Shift=Select, Esc=menu. Drop a ROM file to open it.");
-                ImGui::TextWrapped("%s",message.c_str());
+                }
+                if(!message.empty()) ImGui::TextWrapped("%s",message.c_str());
                 if(ImGui::CollapsingHeader("Licenses")) {
                     ImGui::TextWrapped("Snes9x: non-commercial only. SDL2: zlib. Dear ImGui: MIT. ROMs are not included.");
                     ImGui::BeginChild("notices",{0,240},true,ImGuiWindowFlags_HorizontalScrollbar);
+                    scrollTouchWindow(uiScale);
                     ImGui::TextUnformatted(ThirdPartyNotices); ImGui::EndChild();
                 }
+                ImGui::EndChild();
+                ImGui::PopID();
+                // Tapping the visible game outside the panel also resumes play.
+                auto panelPos=ImGui::GetWindowPos(),panelSize=ImGui::GetWindowSize();
+                bool outside=io.MousePos.x<panelPos.x || io.MousePos.y<panelPos.y ||
+                    io.MousePos.x>=panelPos.x+panelSize.x || io.MousePos.y>=panelPos.y+panelSize.y;
+                if(core.loaded && !focusMenu && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                   outside &&
+                   !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)) { pause=false; showMenu(false); }
                 requestMenuFocus=false;
                 ImGui::End();
             } else {
@@ -356,7 +439,7 @@ int main(int argc,char** argv) {
             if(blockGameInput && gameButtons==0 && !menu) blockGameInput=false;
             core.buttons=(!menu && focused && !blockGameInput && !io.WantTextInput)?gameButtons:0;
             if(core.loaded && (!menu || smoke) && !pause && (focused || smoke)) {
-                for(int i=0;i<core.options.speed;++i) { core.run(); ++frame; }
+                for(int i=0;i<core.options.speed;++i) { core.run(i==core.options.speed-1); ++frame; }
                 if(smoke && frame>=120 && !checkpointVerified) {
                     auto* ram=static_cast<const uint8_t*>(retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM));
                     size_t size=retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM); std::vector<uint8_t> before(ram,ram+size);

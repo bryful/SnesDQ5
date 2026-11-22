@@ -1,6 +1,7 @@
 #include "core.h"
 #include "dq5_rewards.h"
 #include "dq5_options.h"
+#include "dq5_input.h"
 #include "storage.h"
 #include "libretro.h"
 #include "snes9x.h"
@@ -19,6 +20,7 @@ std::string directory;
 void logger(retro_log_level, const char* format, ...) { va_list args; va_start(args,format); vfprintf(stderr,format,args); va_end(args); }
 bool environment(unsigned command,void* data) {
     switch(command) {
+    case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE: *static_cast<int*>(data) = instance->renderVideo ? 3 : 2; return true;
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: static_cast<retro_log_callback*>(data)->log = logger; return true;
     case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
     case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY: *static_cast<const char**>(data) = directory.c_str(); return true;
@@ -38,7 +40,7 @@ bool environment(unsigned command,void* data) {
     }
 }
 void video(const void* data,unsigned w,unsigned h,size_t pitch) {
-    if (!data) return;
+    if (!data || !instance->renderVideo) return;
     auto& c = *instance; c.width=w; c.height=h; c.pixels.resize(size_t(w)*h); ++c.videoFrames;
     for (unsigned y=0;y<h;++y) for (unsigned x=0;x<w;++x) {
         const auto* row = static_cast<const uint8_t*>(data)+y*pitch;
@@ -79,6 +81,8 @@ void Core::load(const std::string& path) {
     supported=romCrc==0xbc955f3b;
     rewardsAvailable=supported && dq5::rewardProfileMatches(rom.data()+header,rom.size()-header);
     gameOptionsAvailable=supported && dq5::optionProfileMatches(rom.data()+header,rom.size()-header);
+    inputTimingAvailable=supported && dq5::inputProfileMatches(rom.data()+header,rom.size()-header);
+    inputSpeedApplied=-1;
     experienceApplied=goldApplied=gameOptionsApplied=-1;
     retro_game_info info{romPath.c_str(),rom.data(),rom.size(),nullptr};
     if(!retro_load_game(&info)) throw std::runtime_error("Snes9x rejected this ROM");
@@ -110,7 +114,7 @@ void Core::applyCheats(bool force) {
     int experience=rewardsAvailable && dq5::validMultiplier(options.experience)?options.experience:1;
     int gold=rewardsAvailable && dq5::validMultiplier(options.gold)?options.gold:1;
     unsigned flags=gameOptionsAvailable?((options.recruit?dq5::Recruit:0u)|(options.drop?dq5::Drop:0u)|(options.equipment?dq5::Equipment:0u)|(options.items?dq5::Items:0u)|(options.level?dq5::Level:0u)):0u;
-    if(experience==experienceApplied && gold==goldApplied && int(flags)==gameOptionsApplied) return;
+    if(experience==experienceApplied && gold==goldApplied && int(flags)==gameOptionsApplied && inputSpeedApplied==speedApplied) return;
     // A snapshot can stop between any two instructions. Wait until the patched routine has returned.
     if(!force && dq5::insideRewardCode(Registers.PBPC)) return;
     retro_cheat_reset();
@@ -118,13 +122,15 @@ void Core::applyCheats(bool force) {
     unsigned index=0;
     auto patches=dq5::rewardPatches(experience,gold);
     if(gameOptionsAvailable) dq5::appendOptionPatches(patches,flags);
+    if(inputTimingAvailable) dq5::appendInputPatches(patches,speedApplied);
     for(auto [address,value]:patches) {
         char code[9]; std::snprintf(code,sizeof(code),"%06X%02X",unsigned(address),unsigned(value));
         retro_cheat_set(index++,true,code);
     }
     experienceApplied=experience;goldApplied=gold;gameOptionsApplied=int(flags);
+    inputSpeedApplied=speedApplied;
 }
-void Core::run() { if(loaded) { applyCheats(); retro_run(); } }
+void Core::run(bool render) { if(loaded) { renderVideo=render; applyCheats(); retro_run(); } }
 void Core::saveRam() {
     if(!loaded || !saveAllowed) return;
     auto size=retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);

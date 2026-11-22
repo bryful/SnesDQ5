@@ -17,7 +17,7 @@ public:
     Core(const Core&)=delete;
     Core& operator=(const Core&)=delete;
     void load(const std::string& path);
-    void run();
+    void run(bool render = true);
     void saveRam();
     void saveState(int slot);
     void loadState(int slot);
@@ -29,12 +29,15 @@ public:
     std::vector<uint32_t> pixels;
     std::string romPath, romName;
     uint16_t buttons = 0;
+    bool renderVideo = true;
+    bool inputTimingAvailable = false;
     std::function<void(const int16_t*,size_t)> audio;
     uint64_t audioFrames = 0, videoFrames = 0;
     int speedApplied = 1;
 private:
     bool saveAllowed=false;
     int experienceApplied=-1,goldApplied=-1,gameOptionsApplied=-1;
+    int inputSpeedApplied=-1;
     void applyCheats(bool force=false);
     uint32_t romCrc=0;
     std::vector<uint8_t> rom;
